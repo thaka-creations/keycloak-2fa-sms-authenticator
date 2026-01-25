@@ -18,6 +18,7 @@ import org.keycloak.theme.Theme;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * @author Abdul Nelfrank, https://thaka-creations.github.io/portfolio/, @abdulnelfrank
@@ -27,6 +28,24 @@ public class SmsAuthenticator implements Authenticator {
 
 	private static final String MOBILE_NUMBER_FIELD = "mobile_number";
 	private static final String TPL_CODE = "login-sms.ftl";
+	
+	// In-memory cache for OTP storage (for Direct Grant flow)
+	// Key format: "realmId:username"
+	private static final Map<String, OtpData> OTP_CACHE = new ConcurrentHashMap<>();
+	
+	private static class OtpData {
+		String code;
+		long expiryTime;
+		
+		OtpData(String code, long expiryTime) {
+			this.code = code;
+			this.expiryTime = expiryTime;
+		}
+		
+		boolean isExpired() {
+			return System.currentTimeMillis() > expiryTime;
+		}
+	}
 
 	@Override
 	public void authenticate(AuthenticationFlowContext context) {
@@ -55,12 +74,18 @@ public class SmsAuthenticator implements Authenticator {
 
 	String code = SecretGenerator.getInstance().randomString(length, SecretGenerator.DIGITS);
 	AuthenticationSessionModel authSession = context.getAuthenticationSession();
-	authSession.setAuthNote(SmsConstants.CODE, code);
-	authSession.setAuthNote(SmsConstants.CODE_TTL, Long.toString(System.currentTimeMillis() + (ttl * 1000L)));
+	long expiryTime = System.currentTimeMillis() + (ttl * 1000L);
 	
-	// Also store in user session for Direct Grant persistence
-	authSession.setUserSessionNote(SmsConstants.CODE, code);
-	authSession.setUserSessionNote(SmsConstants.CODE_TTL, Long.toString(System.currentTimeMillis() + (ttl * 1000L)));
+	// Store in session for browser flows
+	authSession.setAuthNote(SmsConstants.CODE, code);
+	authSession.setAuthNote(SmsConstants.CODE_TTL, Long.toString(expiryTime));
+	
+	// Store in cache for Direct Grant flows (persistent across requests)
+	String cacheKey = getCacheKey(context);
+	OTP_CACHE.put(cacheKey, new OtpData(code, expiryTime));
+	
+	// Clean up expired entries periodically
+	cleanExpiredEntries();
 
 	boolean isDirectGrant = isDirectGrantFlow(context);
 
@@ -127,20 +152,29 @@ public class SmsAuthenticator implements Authenticator {
 
 	private void validateOtp(AuthenticationFlowContext context, String enteredCode) {
 		AuthenticationSessionModel authSession = context.getAuthenticationSession();
-		
-		// Try to get from auth notes first, then from user session notes (for Direct Grant)
-		String code = authSession.getAuthNote(SmsConstants.CODE);
-		String ttl = authSession.getAuthNote(SmsConstants.CODE_TTL);
-		
-		if (code == null || ttl == null) {
-			// Fallback to user session notes for Direct Grant flow
-			code = authSession.getUserSessionNotes().get(SmsConstants.CODE);
-			ttl = authSession.getUserSessionNotes().get(SmsConstants.CODE_TTL);
-		}
-		
 		boolean isDirectGrant = isDirectGrantFlow(context);
+		
+		String code = null;
+		Long expiryTime = null;
+		
+		// Try to get from auth notes first (browser flow)
+		code = authSession.getAuthNote(SmsConstants.CODE);
+		String ttlStr = authSession.getAuthNote(SmsConstants.CODE_TTL);
+		
+		if (code != null && ttlStr != null) {
+			expiryTime = Long.parseLong(ttlStr);
+		} else {
+			// Fallback to cache for Direct Grant flow
+			String cacheKey = getCacheKey(context);
+			OtpData otpData = OTP_CACHE.get(cacheKey);
+			
+			if (otpData != null) {
+				code = otpData.code;
+				expiryTime = otpData.expiryTime;
+			}
+		}
 
-		if (code == null || ttl == null) {
+		if (code == null || expiryTime == null) {
 			if (isDirectGrant) {
 				Map<String, Object> errorData = new HashMap<>();
 				errorData.put("error", "invalid_request");
@@ -161,7 +195,7 @@ public class SmsAuthenticator implements Authenticator {
 
 		boolean isValid = enteredCode != null && enteredCode.equals(code);
 		if (isValid) {
-			if (Long.parseLong(ttl) < System.currentTimeMillis()) {
+			if (expiryTime < System.currentTimeMillis()) {
 				// expired
 				if (isDirectGrant) {
 					Map<String, Object> errorData = new HashMap<>();
@@ -182,7 +216,11 @@ public class SmsAuthenticator implements Authenticator {
 				// valid - clear the OTP to prevent reuse
 				authSession.removeAuthNote(SmsConstants.CODE);
 				authSession.removeAuthNote(SmsConstants.CODE_TTL);
-				// User session notes will be cleared when authentication completes
+				
+				// Clear from cache as well
+				String cacheKey = getCacheKey(context);
+				OTP_CACHE.remove(cacheKey);
+				
 				context.success();
 			}
 		} else {
@@ -248,6 +286,24 @@ public class SmsAuthenticator implements Authenticator {
 		// this will only work if you have the required action from here configured:
 		// https://github.com/dasniko/keycloak-extensions-demo/tree/main/requiredaction
 		user.addRequiredAction("mobile-number-ra");
+	}
+
+	/**
+	 * Generate cache key for OTP storage
+	 * Format: realmId:username
+	 */
+	private String getCacheKey(AuthenticationFlowContext context) {
+		String realmId = context.getRealm().getId();
+		String username = context.getUser().getUsername();
+		return realmId + ":" + username;
+	}
+	
+	/**
+	 * Clean up expired OTP entries from cache
+	 */
+	private void cleanExpiredEntries() {
+		long now = System.currentTimeMillis();
+		OTP_CACHE.entrySet().removeIf(entry -> entry.getValue().isExpired());
 	}
 
 	@Override
