@@ -39,55 +39,61 @@ public class SmsAuthenticator implements Authenticator {
 			return;
 		}
 
-		// No OTP provided - generate and send it
-		AuthenticatorConfigModel config = context.getAuthenticatorConfig();
-		KeycloakSession session = context.getSession();
-		UserModel user = context.getUser();
+	// No OTP provided - generate and send it
+	AuthenticatorConfigModel config = context.getAuthenticatorConfig();
+	KeycloakSession session = context.getSession();
+	UserModel user = context.getUser();
 
-		String mobileNumber = user.getFirstAttribute(MOBILE_NUMBER_FIELD);
-		// mobileNumber of course has to be further validated on proper format, country code, ...
+	String mobileNumber = user.getFirstAttribute(MOBILE_NUMBER_FIELD);
+	// mobileNumber of course has to be further validated on proper format, country code, ...
 
-		int length = Integer.parseInt(config.getConfig().get(SmsConstants.CODE_LENGTH));
-		int ttl = Integer.parseInt(config.getConfig().get(SmsConstants.CODE_TTL));
+	// Get configuration with defaults if config is not set
+	Map<String, String> configMap = config != null ? config.getConfig() : new HashMap<>();
+	int length = Integer.parseInt(configMap.getOrDefault(SmsConstants.CODE_LENGTH, "6"));
+	int ttl = Integer.parseInt(configMap.getOrDefault(SmsConstants.CODE_TTL, "300"));
+	boolean isSimulationMode = Boolean.parseBoolean(configMap.getOrDefault(SmsConstants.SIMULATION_MODE, "true"));
 
-		String code = SecretGenerator.getInstance().randomString(length, SecretGenerator.DIGITS);
-		AuthenticationSessionModel authSession = context.getAuthenticationSession();
-		authSession.setAuthNote(SmsConstants.CODE, code);
-		authSession.setAuthNote(SmsConstants.CODE_TTL, Long.toString(System.currentTimeMillis() + (ttl * 1000L)));
+	String code = SecretGenerator.getInstance().randomString(length, SecretGenerator.DIGITS);
+	AuthenticationSessionModel authSession = context.getAuthenticationSession();
+	authSession.setAuthNote(SmsConstants.CODE, code);
+	authSession.setAuthNote(SmsConstants.CODE_TTL, Long.toString(System.currentTimeMillis() + (ttl * 1000L)));
+	
+	// Also store in user session for Direct Grant persistence
+	authSession.setUserSessionNote(SmsConstants.CODE, code);
+	authSession.setUserSessionNote(SmsConstants.CODE_TTL, Long.toString(System.currentTimeMillis() + (ttl * 1000L)));
 
-		boolean isSimulationMode = Boolean.parseBoolean(config.getConfig().getOrDefault(SmsConstants.SIMULATION_MODE, "false"));
-		boolean isDirectGrant = isDirectGrantFlow(context);
+	boolean isDirectGrant = isDirectGrantFlow(context);
 
 		try {
 			// Send SMS in production mode
 			if (!isSimulationMode) {
 				Theme theme = session.theme().getTheme(Theme.Type.LOGIN);
 				Locale locale = session.getContext().resolveLocale(user);
-				String smsAuthText = theme.getMessages(locale).getProperty("smsAuthText");
-				String smsText = String.format(smsAuthText, code, Math.floorDiv(ttl, 60));
+			String smsAuthText = theme.getMessages(locale).getProperty("smsAuthText");
+			String smsText = String.format(smsAuthText, code, Math.floorDiv(ttl, 60));
 
-				SmsServiceFactory.get(config.getConfig()).send(mobileNumber, smsText);
+			SmsServiceFactory.get(configMap).send(mobileNumber, smsText);
 			}
 
-			// Return appropriate response based on flow type
-			if (isDirectGrant) {
-				// Direct Grant flow - return JSON response
-				Map<String, Object> responseData = new HashMap<>();
-				responseData.put("error", "otp_required");
-				responseData.put("message", isSimulationMode ? "OTP verification required" : "OTP sent to your phone");
-				responseData.put("expires_in", ttl);
-				
-				// Include OTP in response only in simulation mode
-				if (isSimulationMode) {
-					responseData.put("otp", code);
-				}
+		// Return appropriate response based on flow type
+		if (isDirectGrant) {
+			// Direct Grant flow - return JSON response with 200 OK for successful OTP generation
+			Map<String, Object> responseData = new HashMap<>();
+			responseData.put("status", "otp_required");
+			responseData.put("message", isSimulationMode ? "OTP verification required" : "OTP sent to your phone");
+			responseData.put("expires_in", ttl);
+			
+			// Include OTP in response only in simulation mode
+			if (isSimulationMode) {
+				responseData.put("otp", code);
+			}
 
-				Response response = Response.status(Response.Status.UNAUTHORIZED)
-					.type(MediaType.APPLICATION_JSON)
-					.entity(responseData)
-					.build();
-				
-				context.failure(AuthenticationFlowError.INVALID_CREDENTIALS, response);
+			Response response = Response.status(Response.Status.OK)
+				.type(MediaType.APPLICATION_JSON)
+				.entity(responseData)
+				.build();
+			
+			context.failure(AuthenticationFlowError.INVALID_CREDENTIALS, response);
 			} else {
 				// Browser flow - show form
 				context.challenge(context.form().setAttribute("realm", context.getRealm()).createForm(TPL_CODE));
@@ -121,8 +127,17 @@ public class SmsAuthenticator implements Authenticator {
 
 	private void validateOtp(AuthenticationFlowContext context, String enteredCode) {
 		AuthenticationSessionModel authSession = context.getAuthenticationSession();
+		
+		// Try to get from auth notes first, then from user session notes (for Direct Grant)
 		String code = authSession.getAuthNote(SmsConstants.CODE);
 		String ttl = authSession.getAuthNote(SmsConstants.CODE_TTL);
+		
+		if (code == null || ttl == null) {
+			// Fallback to user session notes for Direct Grant flow
+			code = authSession.getUserSessionNotes().get(SmsConstants.CODE);
+			ttl = authSession.getUserSessionNotes().get(SmsConstants.CODE_TTL);
+		}
+		
 		boolean isDirectGrant = isDirectGrantFlow(context);
 
 		if (code == null || ttl == null) {
@@ -167,6 +182,7 @@ public class SmsAuthenticator implements Authenticator {
 				// valid - clear the OTP to prevent reuse
 				authSession.removeAuthNote(SmsConstants.CODE);
 				authSession.removeAuthNote(SmsConstants.CODE_TTL);
+				// User session notes will be cleared when authentication completes
 				context.success();
 			}
 		} else {

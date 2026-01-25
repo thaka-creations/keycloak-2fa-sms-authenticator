@@ -13,10 +13,10 @@ password={password}
 client_id={client_id}
 ```
 
-**Response: 401 Unauthorized**
+**Response: 200 OK**
 ```json
 {
-  "error": "otp_required",
+  "status": "otp_required",
   "message": "OTP verification required",
   "otp": "123456",        // ← Only in simulation mode!
   "expires_in": 300
@@ -58,12 +58,12 @@ client_id={client_id}
 
 ## Common Errors
 
-| Error Code | Meaning | Solution |
-|------------|---------|----------|
-| `otp_required` | Need to provide OTP | Get OTP from response (simulation) or user input |
-| `invalid_otp` | Wrong code | Check the code, retry |
-| `otp_expired` | Code timeout | Request new OTP (start over) |
-| `sms_send_failed` | SMS error | Check AWS SNS config, phone number format |
+| Status/Error Code | HTTP | Meaning | Solution |
+|-------------------|------|---------|----------|
+| `otp_required` | 200 | Need to provide OTP | Get OTP from response (simulation) or user input |
+| `invalid_otp` | 401 | Wrong code | Check the code, retry |
+| `otp_expired` | 400 | Code timeout | Request new OTP (start over) |
+| `sms_send_failed` | 500 | SMS error | Check AWS SNS config, phone number format |
 
 ---
 
@@ -88,26 +88,29 @@ const step1 = await fetch(tokenUrl, {
 });
 
 const data1 = await step1.json();
-const otp = data1.otp || prompt('Enter OTP:'); // Auto in simulation, prompt in production
 
-// Step 2: Verify OTP
-const step2 = await fetch(tokenUrl, {
-  method: 'POST',
-  headers: { 
-    'Content-Type': 'application/x-www-form-urlencoded',
-    'Accept': 'application/json'
-  },
-  body: new URLSearchParams({
-    grant_type: 'password',
-    username: 'user@example.com',
-    password: 'password123',
-    otp: otp,
-    client_id: 'my-client'
-  })
-});
+if (step1.status === 200 && data1.status === 'otp_required') {
+  const otp = data1.otp || prompt('Enter OTP:'); // Auto in simulation, prompt in production
 
-const tokens = await step2.json();
-console.log('Access token:', tokens.access_token);
+  // Step 2: Verify OTP
+  const step2 = await fetch(tokenUrl, {
+    method: 'POST',
+    headers: { 
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Accept': 'application/json'
+    },
+    body: new URLSearchParams({
+      grant_type: 'password',
+      username: 'user@example.com',
+      password: 'password123',
+      otp: otp,
+      client_id: 'my-client'
+    })
+  });
+
+  const tokens = await step2.json();
+  console.log('Access token:', tokens.access_token);
+}
 ```
 
 ---
@@ -155,7 +158,7 @@ curl -X POST 'https://keycloak.example.com/realms/myrealm/protocol/openid-connec
   -d 'password=password123' \
   -d 'client_id=my-client'
 
-# Response: {"error":"otp_required","otp":"123456",...}
+# Response: {"status":"otp_required","otp":"123456",...}
 
 # Step 2: Verify OTP (use the OTP from response or SMS)
 curl -X POST 'https://keycloak.example.com/realms/myrealm/protocol/openid-connect/token' \

@@ -24,12 +24,12 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=password&username={username}&password={password}&client_id={client_id}
 ```
 
-**Response (401 Unauthorized):**
+**Response (200 OK):**
 
 **Simulation Mode:**
 ```json
 {
-  "error": "otp_required",
+  "status": "otp_required",
   "message": "OTP verification required",
   "otp": "123456",
   "expires_in": 300
@@ -39,7 +39,7 @@ grant_type=password&username={username}&password={password}&client_id={client_id
 **Production Mode:**
 ```json
 {
-  "error": "otp_required",
+  "status": "otp_required",
   "message": "OTP sent to your phone",
   "expires_in": 300
 }
@@ -94,12 +94,12 @@ All error responses follow this format for Direct Grant:
 ### OTP Required
 ```json
 {
-  "error": "otp_required",
+  "status": "otp_required",
   "message": "OTP verification required",
   "expires_in": 300
 }
 ```
-HTTP Status: 401
+HTTP Status: 200
 
 ### Invalid OTP
 ```json
@@ -160,43 +160,41 @@ async function loginWithOTP(username: string, password: string): Promise<TokenRe
     })
   });
 
-  if (response1.status === 401) {
-    const data = await response1.json();
+  const data1 = await response1.json();
+  
+  if (response1.status === 200 && data1.status === 'otp_required') {
+    let otp: string;
     
-    if (data.error === 'otp_required') {
-      let otp: string;
-      
-      if (data.otp) {
-        // Simulation mode - OTP in response
-        console.log('OTP (simulation):', data.otp);
-        otp = data.otp; // Auto-fill for testing
-      } else {
-        // Production mode - prompt user
-        otp = await promptUserForOTP();
-      }
+    if (data1.otp) {
+      // Simulation mode - OTP in response
+      console.log('OTP (simulation):', data1.otp);
+      otp = data1.otp; // Auto-fill for testing
+    } else {
+      // Production mode - prompt user
+      otp = await promptUserForOTP();
+    }
 
-      // Second request - verify OTP
-      const response2 = await fetch(tokenUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-          'Accept': 'application/json'
-        },
-        body: new URLSearchParams({
-          grant_type: 'password',
-          username: username,
-          password: password,
-          otp: otp,
-          client_id: clientId
-        })
-      });
+    // Second request - verify OTP
+    const response2 = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Accept': 'application/json'
+      },
+      body: new URLSearchParams({
+        grant_type: 'password',
+        username: username,
+        password: password,
+        otp: otp,
+        client_id: clientId
+      })
+    });
 
-      if (response2.ok) {
-        return await response2.json();
-      } else {
-        const error = await response2.json();
-        throw new Error(error.message || 'OTP verification failed');
-      }
+    if (response2.ok) {
+      return await response2.json();
+    } else {
+      const error = await response2.json();
+      throw new Error(error.message || 'OTP verification failed');
     }
   }
 
@@ -223,30 +221,29 @@ def login_with_otp(username: str, password: str, client_id: str) -> dict:
         headers={'Accept': 'application/json'}
     )
     
-    if response1.status_code == 401:
-        data = response1.json()
+    data1 = response1.json()
+    
+    if response1.status_code == 200 and data1.get('status') == 'otp_required':
+        # Get OTP (from response in simulation, or prompt user in production)
+        otp = data1.get('otp') or input('Enter OTP code: ')
         
-        if data.get('error') == 'otp_required':
-            # Get OTP (from response in simulation, or prompt user in production)
-            otp = data.get('otp') or input('Enter OTP code: ')
-            
-            # Second request - verify OTP
-            response2 = requests.post(
-                token_url,
-                data={
-                    'grant_type': 'password',
-                    'username': username,
-                    'password': password,
-                    'otp': otp,
-                    'client_id': client_id
-                },
-                headers={'Accept': 'application/json'}
-            )
-            
-            if response2.ok:
-                return response2.json()
-            else:
-                raise Exception(response2.json().get('message', 'OTP verification failed'))
+        # Second request - verify OTP
+        response2 = requests.post(
+            token_url,
+            data={
+                'grant_type': 'password',
+                'username': username,
+                'password': password,
+                'otp': otp,
+                'client_id': client_id
+            },
+            headers={'Accept': 'application/json'}
+        )
+        
+        if response2.ok:
+            return response2.json()
+        else:
+            raise Exception(response2.json().get('message', 'OTP verification failed'))
     
     raise Exception('Authentication failed')
 ```
@@ -297,8 +294,8 @@ describe('SMS 2FA Authentication', () => {
   it('should authenticate with OTP', async () => {
     // First request
     const response1 = await authenticate('user', 'pass');
-    expect(response1.status).toBe(401);
-    expect(response1.data.error).toBe('otp_required');
+    expect(response1.status).toBe(200);
+    expect(response1.data.status).toBe('otp_required');
     
     const otp = response1.data.otp; // Simulation mode
     
