@@ -1,0 +1,9 @@
+.idea
+.vscode
+.cursor
+*.iml
+config
+target
+deploy.sh
+.notes
+dependency-reduced-pom.xml
