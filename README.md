@@ -1,9 +1,5 @@
 # Keycloak 2FA SMS Authenticator
 
-> **Notice:**  
-> This repository is not actively maintained and was created for demo purposes only; it is not intended for direct use in production environments.  
-> **Security Warning:** SMS-based 2FA is for convenience—**not security**. SMS can be intercepted or spoofed; avoid for any sensitive authentication needs!
-
 A Keycloak Authentication SPI implementation providing a second-factor authentication step using a one-time password (OTP) sent via SMS (leveraging AWS SNS).
 
 ---
@@ -45,7 +41,3 @@ A Keycloak Authentication SPI implementation providing a second-factor authentic
 - [Direct Grant Guide](DIRECT_GRANT_GUIDE.md)
 
 ---
-
-_Demo and educational purposes only._
-
-**Contributions or bug reports are not being accepted at this time._
