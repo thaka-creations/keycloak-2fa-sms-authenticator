@@ -26,7 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class SmsAuthenticator implements Authenticator {
 
-	private static final String MOBILE_NUMBER_FIELD = "mobile_number";
+	private static final String MOBILE_NUMBER_FIELD = "attributes.phone_number";
 	private static final String TPL_CODE = "login-sms.ftl";
 	
 	// In-memory cache for OTP storage (for Direct Grant flow)
