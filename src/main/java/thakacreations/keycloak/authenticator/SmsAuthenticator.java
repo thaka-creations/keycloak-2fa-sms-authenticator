@@ -111,6 +111,7 @@ public class SmsAuthenticator implements Authenticator {
 			// Include OTP in response only in simulation mode
 			if (isSimulationMode) {
 				responseData.put("otp", code);
+				responseData.put("email", user.getEmail());
 			}
 
 			Response response = Response.status(Response.Status.OK)
@@ -285,7 +286,7 @@ public class SmsAuthenticator implements Authenticator {
 	public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
 		// this will only work if you have the required action from here configured:
 		// https://github.com/dasniko/keycloak-extensions-demo/tree/main/requiredaction
-		user.addRequiredAction("mobile-number-ra");
+		user.addRequiredAction("phone-number-ra");
 	}
 
 	/**
