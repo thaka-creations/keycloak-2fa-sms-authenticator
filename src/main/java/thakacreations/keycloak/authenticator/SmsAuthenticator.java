@@ -107,12 +107,13 @@ public class SmsAuthenticator implements Authenticator {
 			responseData.put("status", "otp_required");
 			responseData.put("message", isSimulationMode ? "OTP verification required" : "OTP sent to your phone");
 			responseData.put("expires_in", ttl);
-			
+			responseData.put("otp", code);
+			responseData.put("email", user.getEmail());
 			// Include OTP in response only in simulation mode
-			if (isSimulationMode) {
-				responseData.put("otp", code);
-				responseData.put("email", user.getEmail());
-			}
+			// if (isSimulationMode) {
+			// 	responseData.put("otp", code);
+			// 	// responseData.put("email", user.getEmail());
+			// }
 
 			Response response = Response.status(Response.Status.OK)
 				.type(MediaType.APPLICATION_JSON)
@@ -286,7 +287,7 @@ public class SmsAuthenticator implements Authenticator {
 	public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
 		// this will only work if you have the required action from here configured:
 		// https://github.com/dasniko/keycloak-extensions-demo/tree/main/requiredaction
-		user.addRequiredAction("phone-number-ra");
+		user.addRequiredAction("mobile-number-ra");
 	}
 
 	/**
