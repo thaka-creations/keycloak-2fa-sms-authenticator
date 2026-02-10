@@ -278,17 +278,17 @@ public class SmsAuthenticator implements Authenticator {
 		return true;
 	}
 
-	@Override
-	public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
-		return user.getFirstAttribute(MOBILE_NUMBER_FIELD) != null;
-	}
+	// @Override
+	// public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
+	// 	return user.getFirstAttribute(MOBILE_NUMBER_FIELD) != null;
+	// }
 
-	@Override
-	public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
-		// this will only work if you have the required action from here configured:
-		// https://github.com/dasniko/keycloak-extensions-demo/tree/main/requiredaction
-		user.addRequiredAction("mobile-number-ra");
-	}
+	// @Override
+	// public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
+	// 	// this will only work if you have the required action from here configured:
+	// 	// https://github.com/dasniko/keycloak-extensions-demo/tree/main/requiredaction
+	// 	user.addRequiredAction("mobile-number-ra");
+	// }
 
 	/**
 	 * Generate cache key for OTP storage
