@@ -64,6 +64,7 @@ public class SmsAuthenticator implements Authenticator {
 	UserModel user = context.getUser();
 
 	String mobileNumber = user.getFirstAttribute(MOBILE_NUMBER_FIELD);
+	boolean hasMobileNumber = mobileNumber != null && !mobileNumber.trim().isEmpty();
 	// mobileNumber of course has to be further validated on proper format, country code, ...
 
 	// Get configuration with defaults if config is not set
@@ -71,6 +72,7 @@ public class SmsAuthenticator implements Authenticator {
 	int length = Integer.parseInt(configMap.getOrDefault(SmsConstants.CODE_LENGTH, "6"));
 	int ttl = Integer.parseInt(configMap.getOrDefault(SmsConstants.CODE_TTL, "300"));
 	boolean isSimulationMode = Boolean.parseBoolean(configMap.getOrDefault(SmsConstants.SIMULATION_MODE, "true"));
+	boolean canSendSms = !isSimulationMode && hasMobileNumber;
 
 	String code = SecretGenerator.getInstance().randomString(length, SecretGenerator.DIGITS);
 	AuthenticationSessionModel authSession = context.getAuthenticationSession();
@@ -90,8 +92,8 @@ public class SmsAuthenticator implements Authenticator {
 	boolean isDirectGrant = isDirectGrantFlow(context);
 
 		try {
-			// Send SMS in production mode
-			if (!isSimulationMode) {
+			// Send SMS only when enabled and a mobile number is present
+			if (canSendSms) {
 				Theme theme = session.theme().getTheme(Theme.Type.LOGIN);
 				Locale locale = session.getContext().resolveLocale(user);
 			String smsAuthText = theme.getMessages(locale).getProperty("smsAuthText");
@@ -105,7 +107,7 @@ public class SmsAuthenticator implements Authenticator {
 			// Direct Grant flow - return JSON response with 200 OK for successful OTP generation
 			Map<String, Object> responseData = new HashMap<>();
 			responseData.put("status", "otp_required");
-			responseData.put("message", isSimulationMode ? "OTP verification required" : "OTP sent to your phone");
+			responseData.put("message", canSendSms ? "OTP sent to your phone" : "OTP verification required");
 			responseData.put("expires_in", ttl);
 			responseData.put("otp", code);
 			responseData.put("email", user.getEmail());
@@ -278,17 +280,17 @@ public class SmsAuthenticator implements Authenticator {
 		return true;
 	}
 
-	// @Override
-	// public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
-	// 	return user.getFirstAttribute(MOBILE_NUMBER_FIELD) != null;
-	// }
+	@Override
+	public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
+		return true;
+	}
 
-	// @Override
-	// public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
-	// 	// this will only work if you have the required action from here configured:
-	// 	// https://github.com/dasniko/keycloak-extensions-demo/tree/main/requiredaction
-	// 	user.addRequiredAction("mobile-number-ra");
-	// }
+	@Override
+	public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
+		// this will only work if you have the required action from here configured:
+		// https://github.com/dasniko/keycloak-extensions-demo/tree/main/requiredaction
+		// user.addRequiredAction("mobile-number-ra");
+	}
 
 	/**
 	 * Generate cache key for OTP storage
