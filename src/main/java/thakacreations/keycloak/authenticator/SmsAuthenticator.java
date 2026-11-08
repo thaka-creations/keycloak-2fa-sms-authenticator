@@ -15,6 +15,8 @@ import org.keycloak.models.UserModel;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.theme.Theme;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -31,6 +33,7 @@ public class SmsAuthenticator implements Authenticator {
 	// UserModel attribute keys — stored in Postgres, shared across all pods
 	private static final String ATTR_OTP_CODE   = "_sms_otp_code";
 	private static final String ATTR_OTP_EXPIRY = "_sms_otp_expiry";
+	private static final String ATTR_OTP_ATTEMPTS = "_sms_otp_attempts";
 
 	@Override
 	public void authenticate(AuthenticationFlowContext context) {
@@ -66,6 +69,7 @@ public class SmsAuthenticator implements Authenticator {
 		// but same user; attributes are Postgres-backed and visible to all pods)
 		user.setSingleAttribute(ATTR_OTP_CODE, code);
 		user.setSingleAttribute(ATTR_OTP_EXPIRY, Long.toString(expiryTime));
+		user.removeAttribute(ATTR_OTP_ATTEMPTS);
 
 		boolean isDirectGrant = isDirectGrantFlow(context);
 
@@ -83,8 +87,10 @@ public class SmsAuthenticator implements Authenticator {
 				responseData.put("status", "otp_required");
 				responseData.put("message", canSendSms ? "OTP sent to your phone" : "OTP verification required");
 				responseData.put("expires_in", ttl);
-				responseData.put("otp", code);
-				responseData.put("email", user.getEmail());
+				if (mayRelayOtp(context, configMap)) {
+					responseData.put("otp", code);
+					responseData.put("email", user.getEmail());
+				}
 
 				Response response = Response.status(Response.Status.OK)
 					.type(MediaType.APPLICATION_JSON)
@@ -200,10 +206,15 @@ public class SmsAuthenticator implements Authenticator {
 				// Clear UserModel attributes (single-use — prevents OTP reuse across pods)
 				user.removeAttribute(ATTR_OTP_CODE);
 				user.removeAttribute(ATTR_OTP_EXPIRY);
+				user.removeAttribute(ATTR_OTP_ATTEMPTS);
 
 				context.success();
 			}
 		} else {
+			if (recordFailedAttempt(context, user)) {
+				authSession.removeAuthNote(SmsConstants.CODE);
+				authSession.removeAuthNote(SmsConstants.CODE_TTL);
+			}
 			if (isDirectGrant) {
 				Map<String, Object> errorData = new HashMap<>();
 				errorData.put("error", "invalid_otp");
@@ -226,6 +237,34 @@ public class SmsAuthenticator implements Authenticator {
 				}
 			}
 		}
+	}
+
+	/** The OTP goes back in the response only to a caller holding the relay secret; with no secret configured, to any caller (legacy). */
+	static boolean mayRelayOtp(AuthenticationFlowContext context, Map<String, String> configMap) {
+		String secret = configMap.get(SmsConstants.OTP_RELAY_SECRET);
+		if (secret == null || secret.isBlank()) {
+			return true;
+		}
+		String presented = context.getHttpRequest().getHttpHeaders().getHeaderString(SmsConstants.OTP_RELAY_HEADER);
+		return presented != null && MessageDigest.isEqual(
+			presented.getBytes(StandardCharsets.UTF_8), secret.getBytes(StandardCharsets.UTF_8));
+	}
+
+	/** Counts a wrong code; after maxAttempts the code is discarded so the user must request a new one. Returns true when discarded. */
+	private boolean recordFailedAttempt(AuthenticationFlowContext context, UserModel user) {
+		AuthenticatorConfigModel config = context.getAuthenticatorConfig();
+		Map<String, String> configMap = config != null ? config.getConfig() : new HashMap<>();
+		int maxAttempts = Integer.parseInt(configMap.getOrDefault(SmsConstants.MAX_ATTEMPTS, "5"));
+		String current = user.getFirstAttribute(ATTR_OTP_ATTEMPTS);
+		int attempts = (current == null ? 0 : Integer.parseInt(current)) + 1;
+		if (attempts >= maxAttempts) {
+			user.removeAttribute(ATTR_OTP_CODE);
+			user.removeAttribute(ATTR_OTP_EXPIRY);
+			user.removeAttribute(ATTR_OTP_ATTEMPTS);
+			return true;
+		}
+		user.setSingleAttribute(ATTR_OTP_ATTEMPTS, Integer.toString(attempts));
+		return false;
 	}
 
 	private boolean isDirectGrantFlow(AuthenticationFlowContext context) {
