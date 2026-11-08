@@ -15,10 +15,11 @@ import org.keycloak.models.UserModel;
 import org.keycloak.sessions.AuthenticationSessionModel;
 import org.keycloak.theme.Theme;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * @author Abdul Nelfrank, https://thaka-creations.github.io/portfolio/, @abdulnelfrank
@@ -28,100 +29,83 @@ public class SmsAuthenticator implements Authenticator {
 
 	private static final String MOBILE_NUMBER_FIELD = "attributes.phone_number";
 	private static final String TPL_CODE = "login-sms.ftl";
-	
-	// In-memory cache for OTP storage (for Direct Grant flow)
-	// Key format: "realmId:username"
-	private static final Map<String, OtpData> OTP_CACHE = new ConcurrentHashMap<>();
-	
-	private static class OtpData {
-		String code;
-		long expiryTime;
-		
-		OtpData(String code, long expiryTime) {
-			this.code = code;
-			this.expiryTime = expiryTime;
-		}
-		
-		boolean isExpired() {
-			return System.currentTimeMillis() > expiryTime;
-		}
-	}
+
+	// UserModel attribute keys — stored in Postgres, shared across all pods
+	private static final String ATTR_OTP_CODE   = "_sms_otp_code";
+	private static final String ATTR_OTP_EXPIRY = "_sms_otp_expiry";
+	private static final String ATTR_OTP_ATTEMPTS = "_sms_otp_attempts";
 
 	@Override
 	public void authenticate(AuthenticationFlowContext context) {
-		// Check if OTP is provided in the request (Direct Grant second attempt)
 		String providedOtp = context.getHttpRequest().getDecodedFormParameters().getFirst(SmsConstants.OTP);
-		
+
 		if (providedOtp != null) {
-			// OTP provided - validate it
 			validateOtp(context, providedOtp);
 			return;
 		}
 
-	// No OTP provided - generate and send it
-	AuthenticatorConfigModel config = context.getAuthenticatorConfig();
-	KeycloakSession session = context.getSession();
-	UserModel user = context.getUser();
+		AuthenticatorConfigModel config = context.getAuthenticatorConfig();
+		KeycloakSession session = context.getSession();
+		UserModel user = context.getUser();
 
-	String mobileNumber = user.getFirstAttribute(MOBILE_NUMBER_FIELD);
-	// mobileNumber of course has to be further validated on proper format, country code, ...
+		String mobileNumber = user.getFirstAttribute(MOBILE_NUMBER_FIELD);
+		boolean hasMobileNumber = mobileNumber != null && !mobileNumber.trim().isEmpty();
 
-	// Get configuration with defaults if config is not set
-	Map<String, String> configMap = config != null ? config.getConfig() : new HashMap<>();
-	int length = Integer.parseInt(configMap.getOrDefault(SmsConstants.CODE_LENGTH, "6"));
-	int ttl = Integer.parseInt(configMap.getOrDefault(SmsConstants.CODE_TTL, "300"));
-	boolean isSimulationMode = Boolean.parseBoolean(configMap.getOrDefault(SmsConstants.SIMULATION_MODE, "true"));
+		Map<String, String> configMap = config != null ? config.getConfig() : new HashMap<>();
+		int length = Integer.parseInt(configMap.getOrDefault(SmsConstants.CODE_LENGTH, "6"));
+		int ttl = Integer.parseInt(configMap.getOrDefault(SmsConstants.CODE_TTL, "300"));
+		boolean isSimulationMode = Boolean.parseBoolean(configMap.getOrDefault(SmsConstants.SIMULATION_MODE, "true"));
+		boolean canSendSms = !isSimulationMode && hasMobileNumber;
 
-	String code = SecretGenerator.getInstance().randomString(length, SecretGenerator.DIGITS);
-	AuthenticationSessionModel authSession = context.getAuthenticationSession();
-	long expiryTime = System.currentTimeMillis() + (ttl * 1000L);
-	
-	// Store in session for browser flows
-	authSession.setAuthNote(SmsConstants.CODE, code);
-	authSession.setAuthNote(SmsConstants.CODE_TTL, Long.toString(expiryTime));
-	
-	// Store in cache for Direct Grant flows (persistent across requests)
-	String cacheKey = getCacheKey(context);
-	OTP_CACHE.put(cacheKey, new OtpData(code, expiryTime));
-	
-	// Clean up expired entries periodically
-	cleanExpiredEntries();
+		String code = SecretGenerator.getInstance().randomString(length, SecretGenerator.DIGITS);
+		AuthenticationSessionModel authSession = context.getAuthenticationSession();
+		long expiryTime = System.currentTimeMillis() + (ttl * 1000L);
 
-	boolean isDirectGrant = isDirectGrantFlow(context);
+		// Store in auth session notes (browser flow — same session across requests)
+		authSession.setAuthNote(SmsConstants.CODE, code);
+		authSession.setAuthNote(SmsConstants.CODE_TTL, Long.toString(expiryTime));
+
+		// Store in UserModel attributes (direct grant flow — different auth sessions,
+		// but same user; attributes are Postgres-backed and visible to all pods)
+		user.setSingleAttribute(ATTR_OTP_CODE, code);
+		user.setSingleAttribute(ATTR_OTP_EXPIRY, Long.toString(expiryTime));
+		user.removeAttribute(ATTR_OTP_ATTEMPTS);
+
+		boolean isDirectGrant = isDirectGrantFlow(context);
 
 		try {
-			// Send SMS in production mode
-			if (!isSimulationMode) {
+			if (canSendSms) {
 				Theme theme = session.theme().getTheme(Theme.Type.LOGIN);
 				Locale locale = session.getContext().resolveLocale(user);
-			String smsAuthText = theme.getMessages(locale).getProperty("smsAuthText");
-			String smsText = String.format(smsAuthText, code, Math.floorDiv(ttl, 60));
-
-			SmsServiceFactory.get(configMap).send(mobileNumber, smsText);
+				String smsAuthText = theme.getMessages(locale).getProperty("smsAuthText");
+				String smsText = String.format(smsAuthText, code, Math.floorDiv(ttl, 60));
+				SmsServiceFactory.get(configMap).send(mobileNumber, smsText);
 			}
 
-		// Return appropriate response based on flow type
-		if (isDirectGrant) {
-			// Direct Grant flow - return JSON response with 200 OK for successful OTP generation
-			Map<String, Object> responseData = new HashMap<>();
-			responseData.put("status", "otp_required");
-			responseData.put("message", isSimulationMode ? "OTP verification required" : "OTP sent to your phone");
-			responseData.put("expires_in", ttl);
-			
-			// Include OTP in response only in simulation mode
-			if (isSimulationMode) {
-				responseData.put("otp", code);
-				responseData.put("email", user.getEmail());
-			}
+			if (isDirectGrant) {
+				Map<String, Object> responseData = new HashMap<>();
+				responseData.put("status", "otp_required");
+				responseData.put("message", canSendSms ? "OTP sent to your phone" : "OTP verification required");
+				responseData.put("expires_in", ttl);
+				if (mayRelayOtp(context, configMap)) {
+					responseData.put("otp", code);
+					responseData.put("email", user.getEmail());
+				}
 
-			Response response = Response.status(Response.Status.OK)
-				.type(MediaType.APPLICATION_JSON)
-				.entity(responseData)
-				.build();
-			
-			context.failure(AuthenticationFlowError.INVALID_CREDENTIALS, response);
+				Response response = Response.status(Response.Status.OK)
+					.type(MediaType.APPLICATION_JSON)
+					.entity(responseData)
+					.build();
+
+				// Intermediate "OTP required" step — must be a CHALLENGE, not a
+				// failure. Using context.failure(INVALID_CREDENTIALS, ...) here
+				// makes Keycloak's brute-force protector count every OTP request
+				// as a failed login, so accounts lock after `failureFactor`
+				// logins (returning "Invalid user credentials" on both login and
+				// verify). A challenge returns the same JSON body without tripping
+				// brute force.
+				context.challenge(response);
 			} else {
-				// Browser flow - show form
 				context.challenge(context.form().setAttribute("realm", context.getRealm()).createForm(TPL_CODE));
 			}
 		} catch (Exception e) {
@@ -134,7 +118,7 @@ public class SmsAuthenticator implements Authenticator {
 					.type(MediaType.APPLICATION_JSON)
 					.entity(errorData)
 					.build();
-				
+
 				context.failure(AuthenticationFlowError.INTERNAL_ERROR, response);
 			} else {
 				context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,
@@ -146,32 +130,34 @@ public class SmsAuthenticator implements Authenticator {
 
 	@Override
 	public void action(AuthenticationFlowContext context) {
-		// This is called for browser flow form submission
 		String enteredCode = context.getHttpRequest().getDecodedFormParameters().getFirst(SmsConstants.CODE);
 		validateOtp(context, enteredCode);
 	}
 
 	private void validateOtp(AuthenticationFlowContext context, String enteredCode) {
 		AuthenticationSessionModel authSession = context.getAuthenticationSession();
+		UserModel user = context.getUser();
 		boolean isDirectGrant = isDirectGrantFlow(context);
-		
+
 		String code = null;
 		Long expiryTime = null;
-		
-		// Try to get from auth notes first (browser flow)
-		code = authSession.getAuthNote(SmsConstants.CODE);
-		String ttlStr = authSession.getAuthNote(SmsConstants.CODE_TTL);
-		
-		if (code != null && ttlStr != null) {
-			expiryTime = Long.parseLong(ttlStr);
+
+		// Primary: auth session notes (browser flow — same auth session)
+		String sessionCode = authSession.getAuthNote(SmsConstants.CODE);
+		String sessionTtl  = authSession.getAuthNote(SmsConstants.CODE_TTL);
+
+		if (sessionCode != null && sessionTtl != null) {
+			code       = sessionCode;
+			expiryTime = Long.parseLong(sessionTtl);
 		} else {
-			// Fallback to cache for Direct Grant flow
-			String cacheKey = getCacheKey(context);
-			OtpData otpData = OTP_CACHE.get(cacheKey);
-			
-			if (otpData != null) {
-				code = otpData.code;
-				expiryTime = otpData.expiryTime;
+			// Fallback: UserModel attributes (direct grant flow — different auth sessions,
+			// same user record in Postgres, consistent across all pods)
+			String attrCode   = user.getFirstAttribute(ATTR_OTP_CODE);
+			String attrExpiry = user.getFirstAttribute(ATTR_OTP_EXPIRY);
+
+			if (attrCode != null && attrExpiry != null) {
+				code       = attrCode;
+				expiryTime = Long.parseLong(attrExpiry);
 			}
 		}
 
@@ -185,7 +171,7 @@ public class SmsAuthenticator implements Authenticator {
 					.type(MediaType.APPLICATION_JSON)
 					.entity(errorData)
 					.build();
-				
+
 				context.failure(AuthenticationFlowError.INTERNAL_ERROR, response);
 			} else {
 				context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,
@@ -197,7 +183,6 @@ public class SmsAuthenticator implements Authenticator {
 		boolean isValid = enteredCode != null && enteredCode.equals(code);
 		if (isValid) {
 			if (expiryTime < System.currentTimeMillis()) {
-				// expired
 				if (isDirectGrant) {
 					Map<String, Object> errorData = new HashMap<>();
 					errorData.put("error", "otp_expired");
@@ -207,25 +192,29 @@ public class SmsAuthenticator implements Authenticator {
 						.type(MediaType.APPLICATION_JSON)
 						.entity(errorData)
 						.build();
-					
+
 					context.failure(AuthenticationFlowError.EXPIRED_CODE, response);
 				} else {
 					context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
 						context.form().setError("smsAuthCodeExpired").createErrorPage(Response.Status.BAD_REQUEST));
 				}
 			} else {
-				// valid - clear the OTP to prevent reuse
+				// Clear auth session notes
 				authSession.removeAuthNote(SmsConstants.CODE);
 				authSession.removeAuthNote(SmsConstants.CODE_TTL);
-				
-				// Clear from cache as well
-				String cacheKey = getCacheKey(context);
-				OTP_CACHE.remove(cacheKey);
-				
+
+				// Clear UserModel attributes (single-use — prevents OTP reuse across pods)
+				user.removeAttribute(ATTR_OTP_CODE);
+				user.removeAttribute(ATTR_OTP_EXPIRY);
+				user.removeAttribute(ATTR_OTP_ATTEMPTS);
+
 				context.success();
 			}
 		} else {
-			// invalid
+			if (recordFailedAttempt(context, user)) {
+				authSession.removeAuthNote(SmsConstants.CODE);
+				authSession.removeAuthNote(SmsConstants.CODE_TTL);
+			}
 			if (isDirectGrant) {
 				Map<String, Object> errorData = new HashMap<>();
 				errorData.put("error", "invalid_otp");
@@ -235,7 +224,7 @@ public class SmsAuthenticator implements Authenticator {
 					.type(MediaType.APPLICATION_JSON)
 					.entity(errorData)
 					.build();
-				
+
 				context.failure(AuthenticationFlowError.INVALID_CREDENTIALS, response);
 			} else {
 				AuthenticationExecutionModel execution = context.getExecution();
@@ -250,25 +239,46 @@ public class SmsAuthenticator implements Authenticator {
 		}
 	}
 
-	/**
-	 * Detects if the current request is a Direct Grant flow
-	 * by checking the request path (token endpoint) or content type expectations
-	 */
+	/** The OTP goes back in the response only to a caller holding the relay secret; with no secret configured, to any caller (legacy). */
+	static boolean mayRelayOtp(AuthenticationFlowContext context, Map<String, String> configMap) {
+		String secret = configMap.get(SmsConstants.OTP_RELAY_SECRET);
+		if (secret == null || secret.isBlank()) {
+			return true;
+		}
+		String presented = context.getHttpRequest().getHttpHeaders().getHeaderString(SmsConstants.OTP_RELAY_HEADER);
+		return presented != null && MessageDigest.isEqual(
+			presented.getBytes(StandardCharsets.UTF_8), secret.getBytes(StandardCharsets.UTF_8));
+	}
+
+	/** Counts a wrong code; after maxAttempts the code is discarded so the user must request a new one. Returns true when discarded. */
+	private boolean recordFailedAttempt(AuthenticationFlowContext context, UserModel user) {
+		AuthenticatorConfigModel config = context.getAuthenticatorConfig();
+		Map<String, String> configMap = config != null ? config.getConfig() : new HashMap<>();
+		int maxAttempts = Integer.parseInt(configMap.getOrDefault(SmsConstants.MAX_ATTEMPTS, "5"));
+		String current = user.getFirstAttribute(ATTR_OTP_ATTEMPTS);
+		int attempts = (current == null ? 0 : Integer.parseInt(current)) + 1;
+		if (attempts >= maxAttempts) {
+			user.removeAttribute(ATTR_OTP_CODE);
+			user.removeAttribute(ATTR_OTP_EXPIRY);
+			user.removeAttribute(ATTR_OTP_ATTEMPTS);
+			return true;
+		}
+		user.setSingleAttribute(ATTR_OTP_ATTEMPTS, Integer.toString(attempts));
+		return false;
+	}
+
 	private boolean isDirectGrantFlow(AuthenticationFlowContext context) {
-		// Check if the request URI contains the token endpoint
 		String requestUri = context.getUriInfo().getRequestUri().getPath();
 		if (requestUri.contains("/token")) {
 			return true;
 		}
 
-		// Check Accept header - Direct Grant clients typically expect JSON
 		String acceptHeader = context.getHttpRequest().getHttpHeaders().getHeaderString("Accept");
-		if (acceptHeader != null && acceptHeader.contains(MediaType.APPLICATION_JSON) 
+		if (acceptHeader != null && acceptHeader.contains(MediaType.APPLICATION_JSON)
 				&& !acceptHeader.contains(MediaType.TEXT_HTML)) {
 			return true;
 		}
 
-		// Default to browser flow
 		return false;
 	}
 
@@ -279,32 +289,11 @@ public class SmsAuthenticator implements Authenticator {
 
 	@Override
 	public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
-		return user.getFirstAttribute(MOBILE_NUMBER_FIELD) != null;
+		return true;
 	}
 
 	@Override
 	public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {
-		// this will only work if you have the required action from here configured:
-		// https://github.com/dasniko/keycloak-extensions-demo/tree/main/requiredaction
-		user.addRequiredAction("phone-number-ra");
-	}
-
-	/**
-	 * Generate cache key for OTP storage
-	 * Format: realmId:username
-	 */
-	private String getCacheKey(AuthenticationFlowContext context) {
-		String realmId = context.getRealm().getId();
-		String username = context.getUser().getUsername();
-		return realmId + ":" + username;
-	}
-	
-	/**
-	 * Clean up expired OTP entries from cache
-	 */
-	private void cleanExpiredEntries() {
-		long now = System.currentTimeMillis();
-		OTP_CACHE.entrySet().removeIf(entry -> entry.getValue().isExpired());
 	}
 
 	@Override

@@ -62,7 +62,9 @@ public class SmsAuthenticatorFactory implements AuthenticatorFactory {
 			new ProviderConfigProperty(SmsConstants.CODE_LENGTH, "Code length", "The number of digits of the generated code.", ProviderConfigProperty.STRING_TYPE, 6),
 			new ProviderConfigProperty(SmsConstants.CODE_TTL, "Time-to-live", "The time to live in seconds for the code to be valid.", ProviderConfigProperty.STRING_TYPE, "300"),
 			new ProviderConfigProperty(SmsConstants.SENDER_ID, "SenderId", "The sender ID is displayed as the message sender on the receiving device.", ProviderConfigProperty.STRING_TYPE, "Keycloak"),
-			new ProviderConfigProperty(SmsConstants.SIMULATION_MODE, "Simulation mode", "In simulation mode, the SMS won't be sent, but printed to the server logs", ProviderConfigProperty.BOOLEAN_TYPE, true)
+			new ProviderConfigProperty(SmsConstants.SIMULATION_MODE, "Simulation mode", "In simulation mode, the SMS won't be sent, but printed to the server logs", ProviderConfigProperty.BOOLEAN_TYPE, true),
+			new ProviderConfigProperty(SmsConstants.OTP_RELAY_SECRET, "OTP relay secret", "When set, the direct-grant response includes the OTP only for requests with this value in the X-OTP-Relay-Secret header (user-service).", ProviderConfigProperty.PASSWORD, null, true),
+			new ProviderConfigProperty(SmsConstants.MAX_ATTEMPTS, "Max attempts", "Wrong codes allowed before the code is discarded.", ProviderConfigProperty.STRING_TYPE, "5")
 		);
 	}
 
