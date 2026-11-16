@@ -27,7 +27,10 @@ import java.util.Map;
  */
 public class SmsAuthenticator implements Authenticator {
 
-	private static final String MOBILE_NUMBER_FIELD = "attributes.phone_number";
+	// User attribute key as written by user-service (was "attributes.phone_number", which never matched).
+	private static final String MOBILE_NUMBER_FIELD = "phone_number";
+	// Synced by user-service (oidc/user_service.py): its User.id, the key notification preferences use.
+	private static final String USER_ID_ATTRIBUTE = "user_id";
 	private static final String TPL_CODE = "login-sms.ftl";
 
 	// UserModel attribute keys — stored in Postgres, shared across all pods
@@ -72,9 +75,15 @@ public class SmsAuthenticator implements Authenticator {
 		user.removeAttribute(ATTR_OTP_ATTEMPTS);
 
 		boolean isDirectGrant = isDirectGrantFlow(context);
+		String relaySecret = configMap.get(SmsConstants.OTP_RELAY_SECRET);
+		String presentedSecret = isDirectGrant ? presentedRelaySecret(context) : null;
+		// When user-service holds the relay secret it delivers the code on the user's preferred
+		// channels, so Keycloak must not also text it (that would send two codes).
+		boolean sendFromKeycloak = shouldSendSmsFromKeycloak(
+			canSendSms, isDirectGrant && relaySecretMatches(relaySecret, presentedSecret));
 
 		try {
-			if (canSendSms) {
+			if (sendFromKeycloak) {
 				Theme theme = session.theme().getTheme(Theme.Type.LOGIN);
 				Locale locale = session.getContext().resolveLocale(user);
 				String smsAuthText = theme.getMessages(locale).getProperty("smsAuthText");
@@ -85,11 +94,11 @@ public class SmsAuthenticator implements Authenticator {
 			if (isDirectGrant) {
 				Map<String, Object> responseData = new HashMap<>();
 				responseData.put("status", "otp_required");
-				responseData.put("message", canSendSms ? "OTP sent to your phone" : "OTP verification required");
+				responseData.put("message", sendFromKeycloak ? "OTP sent to your phone" : "OTP verification required");
 				responseData.put("expires_in", ttl);
-				if (mayRelayOtp(context, configMap)) {
-					responseData.put("otp", code);
-					responseData.put("email", user.getEmail());
+				if (mayRelay(relaySecret, presentedSecret)) {
+					responseData.putAll(relayFields(
+						code, user.getEmail(), user.getFirstAttribute(USER_ID_ATTRIBUTE), mobileNumber));
 				}
 
 				Response response = Response.status(Response.Status.OK)
@@ -240,14 +249,39 @@ public class SmsAuthenticator implements Authenticator {
 	}
 
 	/** The OTP goes back in the response only to a caller holding the relay secret; with no secret configured, to any caller (legacy). */
-	static boolean mayRelayOtp(AuthenticationFlowContext context, Map<String, String> configMap) {
-		String secret = configMap.get(SmsConstants.OTP_RELAY_SECRET);
-		if (secret == null || secret.isBlank()) {
-			return true;
+	static boolean mayRelay(String secret, String presented) {
+		return secret == null || secret.isBlank() || relaySecretMatches(secret, presented);
+	}
+
+	/** True only when a relay secret is configured and the caller presented it (constant-time compare). */
+	static boolean relaySecretMatches(String secret, String presented) {
+		if (secret == null || secret.isBlank() || presented == null) {
+			return false;
 		}
-		String presented = context.getHttpRequest().getHttpHeaders().getHeaderString(SmsConstants.OTP_RELAY_HEADER);
-		return presented != null && MessageDigest.isEqual(
-			presented.getBytes(StandardCharsets.UTF_8), secret.getBytes(StandardCharsets.UTF_8));
+		return MessageDigest.isEqual(presented.getBytes(StandardCharsets.UTF_8), secret.getBytes(StandardCharsets.UTF_8));
+	}
+
+	/** Keycloak texts the code itself only when it can and no secret-holding service took over delivery. */
+	static boolean shouldSendSmsFromKeycloak(boolean canSendSms, boolean relayedToService) {
+		return canSendSms && !relayedToService;
+	}
+
+	/** Fields relayed to user-service so it can deliver without its own lookup; blank optional fields are omitted. */
+	static Map<String, Object> relayFields(String code, String email, String userId, String phoneNumber) {
+		Map<String, Object> fields = new HashMap<>();
+		fields.put("otp", code);
+		fields.put("email", email);
+		if (userId != null && !userId.isBlank()) {
+			fields.put("user_id", userId);
+		}
+		if (phoneNumber != null && !phoneNumber.isBlank()) {
+			fields.put("phone_number", phoneNumber.trim());
+		}
+		return fields;
+	}
+
+	private static String presentedRelaySecret(AuthenticationFlowContext context) {
+		return context.getHttpRequest().getHttpHeaders().getHeaderString(SmsConstants.OTP_RELAY_HEADER);
 	}
 
 	/** Counts a wrong code; after maxAttempts the code is discarded so the user must request a new one. Returns true when discarded. */
